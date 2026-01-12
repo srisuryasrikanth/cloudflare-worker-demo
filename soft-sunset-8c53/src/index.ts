@@ -26,9 +26,131 @@ export default {
 	async fetch(request, env, ctx): Promise<Response> {
 		const url = new URL(request.url);
 
+		// Handle GET /search endpoint - AI-powered semantic search
+		if (request.method === 'GET' && url.pathname === '/search') {
+			try {
+				const searchParams = new URL(request.url).searchParams;
+				const query = searchParams.get('q') || '';
+
+				if (!query.trim()) {
+					return new Response(
+						JSON.stringify({ error: 'Search query is required' }),
+						{
+							status: 400,
+							headers: { 'Content-Type': 'application/json' }
+						}
+					);
+				}
+
+				// Get all feedback records
+				const allRecords = await env.DB.prepare(
+					'SELECT * FROM feedback ORDER BY created_at DESC'
+				).all<{
+					id: number;
+					source: string;
+					content: string;
+					sentiment: string | null;
+					tags: string | null;
+					created_at: string;
+				}>();
+
+				const allFeedback = allRecords.results || [];
+
+				if (allFeedback.length === 0) {
+					return new Response(
+						JSON.stringify({ results: [], query }),
+						{
+							status: 200,
+							headers: { 'Content-Type': 'application/json' }
+						}
+					);
+				}
+
+				// Use AI to semantically match feedback against the search query
+				// Create a prompt that helps AI score relevance
+				const feedbackList = allFeedback.map((fb, idx) => 
+					`[${idx}] ${fb.content}`
+				).join('\n');
+
+				const searchPrompt = `You are a search assistant. Given a search query and a list of feedback entries, identify which feedback entries are most relevant to the query.
+
+Search Query: "${query}"
+
+Feedback Entries:
+${feedbackList}
+
+Return ONLY a JSON array of the indices (numbers in brackets) of the most relevant feedback entries, ordered by relevance (most relevant first). Include at least the top 5 most relevant entries, or all entries if there are fewer than 5.
+
+Example format: [0, 3, 1, 5, 2]
+Return only the JSON array, no other text.`;
+
+				const aiResponse = await env.AI.run('@cf/meta/llama-3-8b-instruct', {
+					prompt: searchPrompt,
+					max_tokens: 200,
+					temperature: 0.1,
+				});
+
+				// Extract indices from AI response
+				const aiText = aiResponse.response || '';
+				let relevantIndices: number[] = [];
+
+				try {
+					// Try to extract JSON array from response
+					const jsonMatch = aiText.match(/\[[\s\S]*?\]/);
+					if (jsonMatch) {
+						relevantIndices = JSON.parse(jsonMatch[0]);
+					} else {
+						// Fallback: try to parse the entire response
+						relevantIndices = JSON.parse(aiText.trim());
+					}
+				} catch {
+					// If AI parsing fails, fall back to simple text matching
+					const queryLower = query.toLowerCase();
+					relevantIndices = allFeedback
+						.map((fb, idx) => ({
+							idx,
+							score: (fb.content.toLowerCase().includes(queryLower) ? 1 : 0) +
+								(fb.tags?.toLowerCase().includes(queryLower) ? 0.5 : 0)
+						}))
+						.filter(item => item.score > 0)
+						.sort((a, b) => b.score - a.score)
+						.map(item => item.idx);
+				}
+
+				// Ensure indices are valid and get unique results
+				const validIndices = [...new Set(relevantIndices)]
+					.filter((idx: number) => idx >= 0 && idx < allFeedback.length)
+					.slice(0, 20); // Limit to top 20 results
+
+				const searchResults = validIndices.map((idx: number) => allFeedback[idx]);
+
+				return new Response(
+					JSON.stringify({ results: searchResults, query, total: searchResults.length }),
+					{
+						status: 200,
+						headers: { 'Content-Type': 'application/json' }
+					}
+				);
+			} catch (error) {
+				return new Response(
+					JSON.stringify({
+						error: 'Search failed',
+						message: error instanceof Error ? error.message : String(error)
+					}),
+					{
+						status: 500,
+						headers: { 'Content-Type': 'application/json' }
+					}
+				);
+			}
+		}
+
 		// Handle GET / endpoint - display feedback records
 		if (request.method === 'GET' && url.pathname === '/') {
 			try {
+				const searchParams = new URL(request.url).searchParams;
+				const searchQuery = searchParams.get('q') || '';
+
 				// Query all feedback records, ordered by created_at descending
 				const records = await env.DB.prepare(
 					'SELECT * FROM feedback ORDER BY created_at DESC'
@@ -41,7 +163,71 @@ export default {
 					created_at: string;
 				}>();
 
-				const feedbackRecords = records.results || [];
+				let feedbackRecords = records.results || [];
+
+				// If there's a search query, filter results using AI search
+				if (searchQuery.trim() && feedbackRecords.length > 0) {
+					try {
+						// Use AI to find relevant feedback
+						const feedbackList = feedbackRecords.map((fb, idx) => 
+							`[${idx}] ${fb.content}`
+						).join('\n');
+
+						const searchPrompt = `You are a search assistant. Given a search query and a list of feedback entries, identify which feedback entries are most relevant to the query.
+
+Search Query: "${searchQuery}"
+
+Feedback Entries:
+${feedbackList}
+
+Return ONLY a JSON array of the indices (numbers in brackets) of the most relevant feedback entries, ordered by relevance (most relevant first). Include at least the top 10 most relevant entries, or all entries if there are fewer than 10.
+
+Example format: [0, 3, 1, 5, 2]
+Return only the JSON array, no other text.`;
+
+						const aiResponse = await env.AI.run('@cf/meta/llama-3-8b-instruct', {
+							prompt: searchPrompt,
+							max_tokens: 200,
+							temperature: 0.1,
+						});
+
+						const aiText = aiResponse.response || '';
+						let relevantIndices: number[] = [];
+
+						try {
+							const jsonMatch = aiText.match(/\[[\s\S]*?\]/);
+							if (jsonMatch) {
+								relevantIndices = JSON.parse(jsonMatch[0]);
+							} else {
+								relevantIndices = JSON.parse(aiText.trim());
+							}
+						} catch {
+							// Fallback to simple text matching
+							const queryLower = searchQuery.toLowerCase();
+							relevantIndices = feedbackRecords
+								.map((fb, idx) => ({
+									idx,
+									score: (fb.content.toLowerCase().includes(queryLower) ? 1 : 0) +
+										(fb.tags?.toLowerCase().includes(queryLower) ? 0.5 : 0)
+								}))
+								.filter(item => item.score > 0)
+								.sort((a, b) => b.score - a.score)
+								.map(item => item.idx);
+						}
+
+						const validIndices = [...new Set(relevantIndices)]
+							.filter((idx: number) => idx >= 0 && idx < feedbackRecords.length);
+
+						if (validIndices.length > 0) {
+							feedbackRecords = validIndices.map((idx: number) => feedbackRecords[idx]);
+						} else {
+							feedbackRecords = [];
+						}
+					} catch (error) {
+						// If AI search fails, fall back to showing all results
+						console.error('Search error:', error);
+					}
+				}
 
 				// Query unique source values from existing records
 				const uniqueSourcesResult = await env.DB.prepare(
@@ -172,11 +358,38 @@ export default {
 			<div id="message" class="hidden mt-4 p-4 rounded-md text-sm"></div>
 		</div>
 
+		<!-- AI Search Card -->
+		<div class="cloudflare-dark rounded-lg border cloudflare-border p-6 mb-6">
+			<h2 class="text-lg font-semibold text-white mb-4">AI-Powered Search</h2>
+			<div class="flex gap-2">
+				<input 
+					type="text" 
+					id="searchInput" 
+					placeholder="Search feedback semantically (e.g., 'login issues', 'pricing concerns', 'UI improvements')..."
+					value="${escapeHtml(searchQuery)}"
+					class="cloudflare-input flex-1 px-3 py-2 border rounded-md text-sm"
+				/>
+				<button 
+					id="searchButton"
+					class="cloudflare-orange text-white py-2 px-6 rounded-md hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-orange-500 focus:ring-offset-2 focus:ring-offset-gray-900 font-medium transition-all text-sm whitespace-nowrap"
+				>
+					Search
+				</button>
+				${searchQuery ? `<button 
+					id="clearSearch"
+					class="bg-gray-700 text-white py-2 px-4 rounded-md hover:bg-gray-600 focus:outline-none focus:ring-2 focus:ring-gray-500 focus:ring-offset-2 focus:ring-offset-gray-900 font-medium transition-all text-sm"
+				>
+					Clear
+				</button>` : ''}
+			</div>
+			<div id="searchMessage" class="hidden mt-4 p-4 rounded-md text-sm"></div>
+		</div>
+
 		<!-- Feedback Records Table Card -->
 		<div class="cloudflare-dark rounded-lg border cloudflare-border overflow-hidden">
 			<div class="px-6 py-4 border-b cloudflare-border">
 				<h2 class="text-lg font-semibold text-white">Feedback Records</h2>
-				<p class="text-xs text-gray-400 mt-1">${feedbackRecords.length} ${feedbackRecords.length === 1 ? 'record' : 'records'}</p>
+				<p class="text-xs text-gray-400 mt-1">${feedbackRecords.length} ${feedbackRecords.length === 1 ? 'record' : 'records'}${searchQuery ? ` (filtered by: "${escapeHtml(searchQuery)}")` : ''}</p>
 			</div>
 			<div class="overflow-x-auto">
 				<table class="min-w-full divide-y cloudflare-table-row">
@@ -282,6 +495,61 @@ export default {
 				messageDiv.textContent = 'Error: ' + error.message;
 			}
 		});
+
+		// Search functionality
+		const searchInput = document.getElementById('searchInput');
+		const searchButton = document.getElementById('searchButton');
+		const clearSearch = document.getElementById('clearSearch');
+		const searchMessage = document.getElementById('searchMessage');
+
+		async function performSearch(query) {
+			if (!query.trim()) {
+				window.location.href = '/';
+				return;
+			}
+
+			searchMessage.classList.remove('hidden');
+			searchMessage.className = 'mt-4 p-4 rounded-md text-sm bg-blue-900/30 text-blue-300 border border-blue-800/50';
+			searchMessage.textContent = 'Searching with AI...';
+
+			try {
+				const response = await fetch('/search?q=' + encodeURIComponent(query));
+				const data = await response.json();
+
+				if (response.ok && data.results) {
+					// Reload page to show filtered results
+					window.location.href = '/?q=' + encodeURIComponent(query);
+				} else {
+					searchMessage.className = 'mt-4 p-4 rounded-md text-sm bg-red-900/30 text-red-300 border border-red-800/50';
+					searchMessage.textContent = 'Error: ' + (data.error || 'Search failed');
+				}
+			} catch (error) {
+				searchMessage.className = 'mt-4 p-4 rounded-md text-sm bg-red-900/30 text-red-300 border border-red-800/50';
+				searchMessage.textContent = 'Error: ' + error.message;
+			}
+		}
+
+		if (searchButton) {
+			searchButton.addEventListener('click', () => {
+				const query = searchInput.value.trim();
+				performSearch(query);
+			});
+		}
+
+		if (searchInput) {
+			searchInput.addEventListener('keypress', (e) => {
+				if (e.key === 'Enter') {
+					const query = searchInput.value.trim();
+					performSearch(query);
+				}
+			});
+		}
+
+		if (clearSearch) {
+			clearSearch.addEventListener('click', () => {
+				window.location.href = '/';
+			});
+		}
 	</script>
 </body>
 </html>`;
