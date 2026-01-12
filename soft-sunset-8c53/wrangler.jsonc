@@ -10,16 +10,21 @@
 	"observability": {
 		"enabled": true
 	},
+	"ai": {
+		"binding": "AI"
+	},
+	"secrets_store_secrets": [{
+		"binding": "SECRET_STORE",
+		"store_id": "8be980799e184cac96c6103e43d3ea5e",
+		"secret_name":"DB_ID"
+	}],
 	"d1_databases": [
 		{
 			"binding": "DB",
 			"database_name": "feedback-db",
-			"database_id": ""
+			"database_id": "e6a3ddc1-26ff-4eae-a50a-b0680a074179"
 		}
 	],
-	"ai": {
-		"binding": "AI"
-	},
 	/**
 	 * Smart Placement
 	 * https://developers.cloudflare.com/workers/configuration/smart-placement/#smart-placement

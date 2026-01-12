@@ -316,7 +316,7 @@ Return only the JSON array, no other text.`;
 		<!-- Header -->
 		<div class="mb-6">
 			<h1 class="text-3xl font-semibold text-white mb-2">Product Feedback Analyzer</h1>
-			<p class="text-sm text-gray-400">Analyze and manage product feedback using Workers AI</p>
+			<p class="text-sm text-gray-400">${await env.SECRET_STORE.get()}</p>
 		</div>
 
 		<!-- Feedback Submission Form Card -->
